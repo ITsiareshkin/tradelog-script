@@ -1,0 +1,431 @@
+#!/bin/sh
+
+export POSIXLY_CORRECT=yes
+export LC_NUMERIC=en_US.UTF-8
+
+#region Variables
+a_DATETIME='0000-00-00 00:00:00'
+b_DATETIME='9999-12-31 23:59:59'
+
+TICKER=""
+COMMAND=""
+FILTERS=""
+WFLAG="0"
+INPUT=""
+FILES=""
+FILES_GZ=""
+#endregion
+
+#region Help-function
+print_help()
+{
+    echo "Usage: tradelog [-h|-help]"
+    echo "       tradelog [FILTR] [PŘÍKAZ] [LOG [LOG2 [...]]"
+    echo ""
+    echo "COMMANDS (only one can be used with each call / can be one of):"
+    echo ""
+    echo "   list-tick     -prints list of occurring stock market symbols, so-called "tickers"."
+    echo "   profit        -prints total profit from closed positions."
+    echo "   pos           -prints list of values of currently held positions sorted in descending order by value."
+    echo "   last-price    -prints list of the last known value for each ticker."
+    echo "   hist-ord      -prints histogram of the number of transactions according to the ticker."
+    echo "   graph-pos     -prints a graph of values for held positions for each ticker."
+    echo ""
+    echo "FILTERS (more than one can be used with each call / can be a combination of the following)"
+    echo ""
+    echo "   -a DATETIME   -only records AFTER given date (without this date)."
+    echo "                  datetime must be entered in format YYYY-MM-DD HH:MM:SS."
+    echo "   -b DATETIME   -only records BEFORE given date (without this date)."
+    echo "                  datetime must be entered in format YYYY-MM-DD HH:MM:SS."
+    echo "   -t TICKER     -only records corresponding to the given ticker"
+    echo "                  in case of several uses of this filter at once, work with all entered tickers"
+    echo "   -w WIDTH      -sets the width of printed graphs, i.e. ie the length of the longest FILE to WIDTH."
+    echo "                  WIDTH must be a positive integer."
+    echo "                  several uses of this filter at once are not possible (Error)"
+    echo ""
+}
+#endregion
+
+#region Error print-exit function
+error_msgs ()
+{
+	printf "ERROR: " >&2
+
+	case "$1" in
+        "1" )
+			printf "Unable to read file.\n" >&2
+			exit 1
+			;;
+        "2" )
+            printf "Double use of same filter.\n" >&2
+            exit 2
+            ;;
+		"3" )
+			printf "Missing arguments for filter.\n" >&2
+			exit 3
+			;;
+        "4" )
+			printf "Wrong time format. Expected 0000-00-00 00:00:00\n" >&2
+			exit 4
+			;;
+        "5" )
+			printf "Wrong width format. Expected positive integer.\n" >&2
+			exit 5
+			;;
+        "6" )
+			printf "Wrong ticker format. Expected uppercase A-Z letters.\n" >&2
+			exit 6
+			;;
+        "7" )
+            printf "Wrong input.\n"
+	esac
+}
+#endregion
+
+#region Filters-parsing while loop
+while getopts "h|help:a:b:t:w:" OPTION; do
+    case "$OPTION" in
+    h|help)
+        print_help
+        exit 0
+        ;;
+    a)
+        if [ ! "$OPTARG" ]; then
+            error_msgs "3"
+            exit 3
+        fi
+
+        if ! echo "$OPTARG" | grep -wq "[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9]" ; then
+            error_msgs "4"
+            exit 4
+        fi
+
+        a_DATETIME="$OPTARG"
+        ;;
+    b)
+        if [ ! "$OPTARG" ]; then
+            error_msgs "3"
+            exit 3
+        fi
+
+        if ! echo "$OPTARG" | grep -wq "[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9]" ; then
+            error_msgs "4"
+            exit 4
+        fi
+
+        b_DATETIME="$OPTARG"
+        ;;
+    w)
+        if [ "$WIDTH" ]; then
+            error_msgs "2"
+            exit 2
+        fi
+
+        if [ ! "$OPTARG" ]; then
+            error_msgs "3"
+            exit 3
+        fi
+
+        if ! echo "$OPTARG" | grep -wq "[0-9]*[0-9]" || [ $OPTARG -le 1 ]; then
+            error_msgs "5"
+            exit 5
+        fi
+
+        WIDTH="$OPTARG"
+        WFLAG="1"
+        ;;
+    t)
+        if [ ! "$OPTARG" ]; then
+            error_msgs "3"
+            exit 3
+        fi
+
+        if ! echo "$OPTARG" | grep -wq "[A-Z]*[A-Z]" ; then
+            error_msgs "6"
+            exit 6
+        fi
+
+        if [ ! $TICKER ] ; then
+            TICKER=$OPTARG
+        else
+            TICKER="$TICKER\|$OPTARG"
+        fi
+        ;;
+    *)
+        error_msgs "7"
+        exit 7
+    esac
+done
+shift $(( $OPTIND - 1))
+#endregion
+
+#region Commands parsing
+for cmd in list-tick profit pos last-price hist-ord graph-pos; do
+	if [ "$1" = "$cmd" ]; then
+		CMD=$cmd
+		shift
+		break
+	fi
+done
+#endregion
+
+#region Input check
+if [ ! $1 ]; then
+	INPUT='cat - '
+	STDIN=1
+fi
+#endregion
+
+#region File-parsing while-loop
+while [ "$#" -gt 0 ]; do
+    if [ ! $STDIN ]; then
+		if [ ! -r $1 ]; then
+            error_msgs "1"
+            exit 1
+        fi
+
+        case "$1" in
+        *.log)
+            if [ -z "$FILES" ]; then
+                FILES="$1"
+            else
+                FILES="$FILES $1"
+            fi
+            shift
+            ;;
+        *.gz)
+            if [ -z "$FILES_GZ" ]; then
+                FILES_GZ="$1"
+            else
+                FILES_GZ="$FILES_GZ $1"
+            fi
+            shift
+            ;;
+        esac
+	fi
+done
+#endregion
+
+#region Putting all files in one variable
+if [ -z $FILES_GZ ]; then
+	INPUT="cat $FILES"
+else
+	INPUT="gzip -c -d $FILES_GZ | cat $FILES"
+fi
+#endregion
+
+#region Filtration by ticker
+if [ "$TICKER" ]; then
+    FILTERS="$FILTERS | grep ';$TICKER;'"
+fi
+#endregion
+
+#region
+# If -w parameter is not set, default width is 1
+if [ "$WFLAG" -eq "0" ]; then
+    WIDTH="1"
+fi
+#endregion
+
+#region Putting filtered input in variable
+FILTERED=""
+FILTERED=$(eval $INPUT $FILTERS)
+#endregion
+
+#region Main
+if [ ! $CMD ] ; then # FIX FOR -a and -b xD
+    printf "$FILTERED\n"
+else
+	case $CMD in
+		list-tick)
+			listtick=$(printf "$FILTERED\n" | awk -F ';' -v after="$a_DATETIME" -v before="$b_DATETIME"\
+            '\
+            {\
+                if($1 > after && $1 < before)\
+                {\
+                    print $2\
+                }\
+            }' | sort -u)
+            echo "$listtick"
+			;;
+		profit)
+            profit=$(printf "$FILTERED\n" | awk -F';' -v after="$a_DATETIME" -v before="$b_DATETIME"\
+            '\
+            {\
+                if($1 > after && $1 < before)\
+                {\
+                    if($3 ~ "sell")\
+                    {\
+                        s = s + $4*$6\
+                    }else {b = b + $4*$6}\
+                }\
+            } END\
+            {\
+                printf "%.2f", s-b;\
+            }')
+            echo "$profit"
+            ;;
+        pos)
+            pos=$(printf "$FILTERED\n" | awk -F';' -v after="$a_DATETIME" -v before="$b_DATETIME"\
+            '\
+            {\
+                if($1 > after && $1 < before)\
+                {\
+                    price[$2]=$4
+                    if($3 ~ "sell")\
+                    {\
+                        held[$2]-=$6\
+                    }else {held[$2]+=$6}\
+                }\
+            } END\
+            {\
+                for(i in price)\
+                {\
+                    p=held[i]*price[i];\
+                    p=sprintf("%.2f",p);\
+                    if(length(p)>last)\
+                    {\
+                        last=length(p)\
+                    }\
+                }\
+
+                for(tick in held)\
+                {\
+                    value=held[tick]*price[tick];\
+                    printf "%-10s: %*.2f\n",tick,last,value;\
+                }\
+            }' | sort -k3 -nr)
+            echo "$pos"
+            ;;
+		last-price)
+			lastprice=$(printf "$FILTERED\n" | awk -F';' -v after="$a_DATETIME" -v before="$b_DATETIME"\
+            '\
+            {\
+                if($1 > after && $1 < before)\
+                {\
+                    price[$2]=$4
+                    if(length($4) > last)
+                    {\
+                        last=length($4)\
+                    }\
+                }\
+            } END\
+            {\
+                for(i in price)
+                {\
+                    printf "%-10s: %*.2f\n" , i, last, price[i];\
+                }\
+            }' | sort -u)
+            echo "$lastprice"
+			;;
+		hist-ord)
+            histord=$(printf "$FILTERED\n" | awk -F';' -v width="$WIDTH" -v set="$WFLAG" -v after="$a_DATETIME" -v before="$b_DATETIME"\
+            '\
+            {
+                if($1 > after && $1 < before)\
+                {\
+                    a[$2]+=1
+                    max=0
+                }\
+            } END\
+            {\
+                if($1 > after && $1 < before)\
+                {\
+                    for(i in a)\
+                    {\
+                        if(a[i]>max)
+                        {\
+                            max=a[i]\
+                        }\
+                    }\
+
+                    for (i in a)\
+                    {\
+                        printf "%-10s:", i;\
+                        if(set=="0")\
+                        {\
+                            a[i]=int(a[i]/width)\
+                        }else {a[i]=int(a[i]*width/max)}\
+
+                        if(a[i]!=0)\
+                        {\
+                            printf " ";\
+                        }\
+
+                        for (j = 0; j < a[i]; j++)\
+                        {\
+                            printf "%s", "#";\
+                        }\
+                        printf "\n"\
+                    }\
+                }\
+            }' | sort -u)
+            echo "$histord"
+			;;
+		graph-pos)
+            if [ "$WFLAG" -eq 0 ]; then
+                WIDTH="1000";
+            fi
+
+            graphpos=$(printf "$FILTERED\n" | awk -F';' -v w="$WIDTH" -v after="$a_DATETIME" -v before="$b_DATETIME"\
+            '\
+            function ABC(var) {return var < 0 ? -var : var}\
+            BEGIN\
+            {\
+                max=0
+                max_price=0
+            }\
+            {\
+                if($1 > after && $1 < before)\
+                {\
+                    price[$2]=$4
+                    if($3 ~ "sell")\
+                    {\
+                        held[$2]-=$6\
+                    }else {held[$2]+=$6}\
+                }\
+            } END\
+            {\
+                for(i in price)\
+                {\
+                    p=held[i]*price[i]
+
+                    if(ABC(p)>max_price)\
+                    {\
+                        max_price=ABC(p)\
+                    }\
+                }\
+
+                for(i in price)\
+                {\
+                    p=held[i]*price[i]
+                    printf "%-10s:", i;\
+                    if(set ~ "0")\
+                    {\
+                        p=int(p/w)\
+                    }else {p=int(p*w/max_price)}\
+
+                    if(p>0)\
+                    {\
+                        printf " ";\
+                        for(j = 0; j < p; j++)\
+                        {\
+                            printf "%s", "#";\
+                        }\
+                    }else if(p<0)
+                    {\
+                        printf " ";\
+                        p=ABC(p)
+                        for(j = 0; j < p; j++)\
+                        {\
+                            printf "%s", "!";\
+                        }\
+                    }\
+                    printf "\n";
+                }\
+            }' | sort -u)
+            echo "$graphpos"
+		    ;;
+	esac
+fi
+#endregion
